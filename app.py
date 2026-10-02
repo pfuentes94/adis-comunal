@@ -26,6 +26,26 @@ NOTA_RESERVA = (
     "Las celdas con reserva estadística se muestran como «1 a 9». Las cifras que suman categorías con reserva "
     "se muestran como valor aproximado (punto medio). En gráficos y mapas se usa el valor central."
 )
+AYUDA = """
+**Cómo usar**
+1. Sube la base de datos (Excel) en el recuadro «Base de datos».
+2. Elige la vista: **Tablas**, **Gráficos** o **Mapas**.
+3. Opcional: elige una *variable de filtro* y sus categorías, y un *tipo de apertura*.
+4. Usa **Descargar** para llevarte la tabla a Excel.
+
+**Qué significan las cifras**
+- **1 a 9**: ADIS reserva las cifras bajas por secreto estadístico. En gráficos se dibujan con el valor central (5) y en mapas con gris.
+- **~430**: ADIS entrega la cifra aproximada, no exacta.
+- **Cifras sin «a»**: son valores publicados por ADIS. Si suman categorías con reserva, se muestran como valor aproximado.
+- **Sin información**: registros sin dato en esa variable.
+
+**Números y porcentajes**
+- **% de la fila**: sobre el total de cada unidad vecinal.
+- **% de la columna**: cuánto aporta cada unidad vecinal al total comunal.
+
+**Cruces**
+Solo existen los cruces descargados de ADIS (o su inverso). Si eliges uno que no existe, la app lo avisa. El detalle está en «Cruces disponibles», al final de la página.
+"""
 CLASIFICACIONES = ["Quiebres naturales", "Cuantiles", "Intervalos iguales"]
 PALETAS_MAPA = {
     "Azules": ["#eff3ff", "#bdd7e7", "#6baed6", "#3182bd", "#08519c"],
@@ -58,6 +78,9 @@ st.markdown(
     button[kind="primary"]:hover {background:#173c6c; border-color:#173c6c; color:#fff;}
     button[kind="secondary"] {border-color:#1f4e8c; color:#1f4e8c; background:#fff;}
     button[kind="secondary"]:hover {border-color:#173c6c; color:#173c6c; background:#e8eef6;}
+    .resumen {margin: 2px 0 4px 0; line-height: 2;}
+    .resumen-et {color:#4a5a70; font-size:0.82rem; margin-right:6px;}
+    .caja {display:inline-block; background:#1f4e8c; color:#fff; border-radius:5px; padding:1px 9px; margin:0 5px 0 0; font-size:0.8rem;}
     .nota {color:#4a5a70; font-size:0.78rem; line-height:1.3; margin-top:10px;}
     </style>
     """,
@@ -96,6 +119,7 @@ def preparar(df: pd.DataFrame) -> pd.DataFrame:
     df["lo"] = np.where(reserva, 1.0, df["personas"])
     df["hi"] = np.where(reserva, 9.0, df["personas"])
     df["derivado"] = False
+    df["ap_flag"] = (df["estado"] == "aproximado").astype(float)
     return agregar_invertidos(df)
 
 
@@ -114,7 +138,7 @@ def agregar_invertidos(df: pd.DataFrame) -> pd.DataFrame:
     simple = df[(df["filtro_variable"] == SIN_FILTRO) & ~df["apertura_categoria"].isin([COL_TOT, COL_SI])]
     simple = simple.drop(columns=["filtro_variable", "filtro_categoria"]).rename(
         columns={"apertura_variable": "filtro_variable", "apertura_categoria": "filtro_categoria"})
-    simple = simple[["filtro_variable", "filtro_categoria", "unidad_vecinal", "personas", "estado", "lo", "hi"]]
+    simple = simple[["filtro_variable", "filtro_categoria", "unidad_vecinal", "personas", "estado", "lo", "hi", "ap_flag"]]
     claves = inv[["filtro_variable", "filtro_categoria", "apertura_variable"]].drop_duplicates()
     tot = claves.merge(simple, on=["filtro_variable", "filtro_categoria"])
     tot["apertura_categoria"] = COL_TOT
@@ -122,6 +146,22 @@ def agregar_invertidos(df: pd.DataFrame) -> pd.DataFrame:
     inv["derivado"] = True
     tot["derivado"] = True
     return pd.concat([df, inv.reindex(columns=df.columns), tot.reindex(columns=df.columns)], ignore_index=True)
+
+
+def leer_corte(archivo) -> str | None:
+    """Lee el corte del RSH (p. ej. «Agosto 2026») desde la hoja «leeme» y lo devuelve como «agosto del 2026»."""
+    try:
+        if hasattr(archivo, "seek"):
+            archivo.seek(0)
+        x = pd.read_excel(archivo, sheet_name="leeme", header=None)
+        fila = x[x.iloc[:, 0].astype(str).str.lower().str.contains("corte")]
+        m = re.search(r"([A-Za-zÁÉÍÓÚáéíóúñÑ]+)\s+(\d{4})", str(fila.iloc[0, 1]))
+        return f"{m.group(1).lower()} del {m.group(2)}" if m else None
+    except Exception:
+        return None
+    finally:
+        if hasattr(archivo, "seek"):
+            archivo.seek(0)
 
 
 def leer_base(archivo) -> pd.DataFrame | None:
@@ -193,13 +233,16 @@ def estructura(df: pd.DataFrame):
 
 
 # ---------------------------------------------------------------- cálculo
-def calcular(df, fvar, fcats, ap, porcentaje):
-    """Devuelve (lo, hi) con filas = UV + S.I. + Total y columnas = categorías."""
+def calcular(df, fvar, fcats, ap, porcentaje, base_pct="fila"):
+    """Devuelve (lo, hi) con filas = UV + S.I. + Total y columnas = categorías.
+    lo.attrs["aprox"] indica las celdas que ADIS publicó con «~».
+    base_pct: «fila» (sobre el total de cada UV) o «columna» (sobre el total de la columna)."""
     uvs = sorted([u for u in df["unidad_vecinal"].unique() if u not in ("S.I.", "TOTAL")], key=orden_uv)
     filas = uvs + [u for u in ["S.I."] if u in set(df["unidad_vecinal"])] + ["TOTAL"]
 
     base = df[(df["filtro_variable"] == SIN_FILTRO) & (df["apertura_categoria"] == COL_TOT)]
     total_rsh = base.groupby("unidad_vecinal")["lo"].first().reindex(filas)
+    flag_rsh = base.groupby("unidad_vecinal")["ap_flag"].first().reindex(filas).fillna(0) > 0
 
     if fvar == SIN_FILTRO:
         sub = df[df["filtro_variable"] == SIN_FILTRO]
@@ -209,33 +252,43 @@ def calcular(df, fvar, fcats, ap, porcentaje):
     if ap is None:
         ap0 = sub["apertura_variable"].iloc[0]
         s = sub[(sub["apertura_variable"] == ap0) & (sub["apertura_categoria"] == COL_TOT)]
-        g = s.groupby("unidad_vecinal")[["lo", "hi"]].sum().reindex(filas)
+        g = s.groupby("unidad_vecinal")[["lo", "hi", "ap_flag"]].sum().reindex(filas)
         lo = pd.DataFrame({COL_SEL: g["lo"], COL_TOTAL: total_rsh})
         hi = pd.DataFrame({COL_SEL: g["hi"], COL_TOTAL: total_rsh})
+        flag = pd.DataFrame({COL_SEL: g["ap_flag"].fillna(0) > 0, COL_TOTAL: flag_rsh})
         den = total_rsh
     else:
         s = sub[sub["apertura_variable"] == ap]
         orden = [c for c in pd.unique(s["apertura_categoria"]) if c != COL_TOT]
         orden = [c for c in orden if c != COL_SI] + [c for c in orden if c == COL_SI] + [COL_TOT]
-        g = s.groupby(["unidad_vecinal", "apertura_categoria"])[["lo", "hi"]].sum()
+        g = s.groupby(["unidad_vecinal", "apertura_categoria"])[["lo", "hi", "ap_flag"]].sum()
         lo = g["lo"].unstack().reindex(index=filas, columns=orden)
         hi = g["hi"].unstack().reindex(index=filas, columns=orden)
+        flag = g["ap_flag"].unstack().reindex(index=filas, columns=orden).fillna(0) > 0
         den = lo[COL_TOT]
 
-    if porcentaje:
-        d = den.replace(0, np.nan)
-        cols = [c for c in lo.columns if c not in (COL_TOTAL,)]
-        for c in cols:
-            if c in (COL_TOT,):
+    reserva = (hi > lo) & (lo < 10)  # cifras bajas sin valor exacto (antes de pasar a %)
+
+    if porcentaje and base_pct == "columna":
+        for c in lo.columns:
+            if c == COL_TOTAL:
                 continue
+            d = lo.at["TOTAL", c] if "TOTAL" in lo.index and pd.notna(lo.at["TOTAL", c]) and lo.at["TOTAL", c] > 0 \
+                else lo.drop(index="TOTAL", errors="ignore")[c].sum()
+            lo[c], hi[c] = lo[c] / d * 100, hi[c] / d * 100
+    elif porcentaje:
+        d = den.replace(0, np.nan)
+        for c in [c for c in lo.columns if c not in (COL_TOTAL, COL_TOT)]:
             lo[c], hi[c] = lo[c] / d * 100, hi[c] / d * 100
         if ap is not None:
             lo[COL_TOT], hi[COL_TOT] = 100.0, 100.0
-        else:
-            pass
     lo.index = [("Total" if i == "TOTAL" else i) for i in lo.index]
     hi.index = lo.index
+    flag.index = lo.index
+    reserva.index = lo.index
     lo.index.name = hi.index.name = "Unidades Vecinales"
+    lo.attrs["aprox"] = flag
+    lo.attrs["reserva"] = reserva
     return lo, hi
 
 
@@ -248,24 +301,30 @@ def f_pct(v):
 
 
 def texto_tabla(lo, hi, porcentaje):
-    f = f_pct if porcentaje else f_num
+    flag = lo.attrs.get("aprox")
+    reserva = lo.attrs.get("reserva")
     out = pd.DataFrame(index=lo.index, columns=lo.columns, dtype=object)
     for c in lo.columns:
+        f = f_num if c == COL_TOTAL else (f_pct if porcentaje else f_num)
         for i in lo.index:
             a, b = lo.at[i, c], hi.at[i, c]
             if pd.isna(a):
                 out.at[i, c] = ""
-            elif abs(a - b) < 1e-9 or (c == COL_TOTAL):
-                out.at[i, c] = f(a)
-            elif porcentaje:
-                if a >= 10:
-                    out.at[i, c] = f_pct((a + b) / 2)
-                else:
-                    out.at[i, c] = f"{a:.1f} a {b:.1f} %".replace(".", ",")
-            elif a >= 10:
-                out.at[i, c] = f_num((a + b) / 2)
+                continue
+            if abs(a - b) < 1e-9 or c == COL_TOTAL:
+                t = f(a)
             else:
-                out.at[i, c] = f"{f_num(a)} a {f_num(b)}"
+                es_res = bool(reserva.at[i, c]) if reserva is not None else a < 10
+                if not es_res:
+                    t = f_pct((a + b) / 2) if porcentaje else f_num((a + b) / 2)
+                elif porcentaje:
+                    t = ("< 0,1 %" if round(b, 1) == 0 else f_pct(b)) if round(a, 1) == round(b, 1) \
+                        else f"{a:.1f} a {b:.1f} %".replace(".", ",")
+                else:
+                    t = f"{f_num(a)} a {f_num(b)}"
+            aprox = flag is not None and bool(flag.at[i, c])
+            es_rango = " a " in t
+            out.at[i, c] = ("~" + t) if (aprox and not es_rango) else t
     out = out.rename(columns={COL_SI: COL_SI + "*"})
     out.columns.name = None
     cols = [c for c in out.columns if c not in (COL_TOT, COL_TOTAL)] + [c for c in out.columns if c in (COL_TOT, COL_TOTAL)]
@@ -281,7 +340,7 @@ PALETAS = {
 ORDENES = ["Unidad vecinal", "Valor (mayor a menor)", "Valor (menor a mayor)"]
 
 
-def grafico(valores, apertura, porcentaje, color, paleta, orden):
+def grafico(valores, apertura, porcentaje, color, paleta, orden, apilado=True):
     unidad = "%" if porcentaje else "personas"
     v = valores.copy()
     if orden != "Unidad vecinal":
@@ -300,7 +359,7 @@ def grafico(valores, apertura, porcentaje, color, paleta, orden):
             )
         )
     fig.update_layout(
-        barmode="stack" if not porcentaje else "group",
+        barmode="stack" if apilado else "group",
         showlegend=True,
         height=620,
         margin=dict(l=10, r=10, t=20, b=60),
@@ -313,18 +372,21 @@ def grafico(valores, apertura, porcentaje, color, paleta, orden):
     return fig
 
 
-def clasificar(serie: pd.Series, metodo: str, k: int = 5) -> pd.Series:
-    v = serie.astype(float)
-    k = max(1, min(k, v.nunique()))
+def calcular_bins(valores, metodo: str, k: int = 5):
+    """Límites superiores de cada clase, calculados con los valores exactos (sin reserva)."""
+    v = np.asarray(pd.Series(valores).dropna(), dtype=float)
+    if v.size == 0:
+        return np.array([0.0])
+    k = max(1, min(k, len(np.unique(v))))
     if k == 1:
-        return pd.Series(0, index=v.index)
+        return np.array([v.max()])
     if metodo == "Quiebres naturales":
-        cl = mapclassify.NaturalBreaks(v.to_numpy(), k=k)
+        cl = mapclassify.NaturalBreaks(v, k=k)
     elif metodo == "Cuantiles":
-        cl = mapclassify.Quantiles(v.to_numpy(), k=k)
+        cl = mapclassify.Quantiles(v, k=k)
     else:
-        cl = mapclassify.EqualInterval(v.to_numpy(), k=k)
-    return pd.Series(cl.yb, index=v.index).rank(method="dense").astype(int) - 1
+        cl = mapclassify.EqualInterval(v, k=k)
+    return np.unique(np.asarray(cl.bins, dtype=float))
 
 
 def zoom_para(w, s, e, n, px_w=900, px_h=640):
@@ -335,57 +397,77 @@ def zoom_para(w, s, e, n, px_w=900, px_h=640):
     return float(min(z_w, z_h)) - 0.15
 
 
-def mapa_tematico(serie, totales, porcentaje, metodo, base, rotulos, zona, paleta_mapa):
-    gj, info = cargar_geo()
-    serie = serie[serie.index.isin(info.index)].dropna()
+COLOR_RESERVA = "#cfd4da"
+
+
+def colores_bins(bins, paleta_mapa):
+    paleta = PALETAS_MAPA[paleta_mapa]
+    return {c: paleta[i] for c, i in enumerate(np.linspace(0, 4, len(bins)).round().astype(int))}
+
+
+def leyenda_bins(bins, porcentaje, paleta_mapa, con_reserva):
     fmt = f_pct if porcentaje else f_num
-    clases = clasificar(serie, metodo)
-    n_clases = int(clases.max()) + 1
-    colores = [PALETAS_MAPA[paleta_mapa][i] for i in np.linspace(0, 4, n_clases).round().astype(int)]
+    unidad = 0.1 if porcentaje else 1
+    col = colores_bins(bins, paleta_mapa)
+    out = [(col[c], f"{fmt(0 if c == 0 else bins[c - 1] + unidad)} - {fmt(bins[c])}") for c in range(len(bins))]
+    if con_reserva:
+        out.append((COLOR_RESERVA, "Reserva estadística (cifra baja)"))
+    return out
+
+
+def texto_reserva(a, b):
+    return f"{f_num(a)} a {f_num(b)}"
+
+
+def mapa_tematico(serie, lo_n, hi_n, totales, porcentaje, bins, base, rotulos, zona, paleta_mapa, nombre, etq_total, altura=640):
+    """serie: valor central (números o %). lo_n/hi_n: límites en número de personas.
+    Las UV con reserva (cifra baja, sin valor exacto) se pintan en gris y se rotulan «1 a 9»."""
+    gj, info = cargar_geo()
+    idx = [c for c in serie.index if c in info.index and pd.notna(serie[c])]
+    serie, lo_n, hi_n = serie[idx], lo_n[idx], hi_n[idx]
+    fmt = f_pct if porcentaje else f_num
+    reserva = (hi_n > lo_n) & (lo_n < 10)
+    exactas = serie[~reserva]
+    clase = pd.Series(np.searchsorted(bins, exactas.to_numpy(dtype=float), side="left").clip(0, len(bins) - 1), index=exactas.index)
+    usadas = sorted(clase.unique())
+    colores = colores_bins(bins, paleta_mapa)
+
+    def texto(c):
+        return texto_reserva(lo_n[c], hi_n[c]) if reserva[c] else fmt(serie[c])
+
+    def hover(c):
+        if reserva[c]:
+            cuerpo = f"{nombre}: {texto_reserva(lo_n[c], hi_n[c])} personas"
+        elif porcentaje:
+            cuerpo = f"{nombre}: {fmt(serie[c])}"
+        else:
+            tot = totales.get(c, np.nan)
+            cuerpo = f"{nombre}: {fmt(serie[c])} personas" + (f" ({serie[c] / tot * 100:.1f} %)".replace(".", ",") if tot and tot > 0 else "")
+        return f"<b>UV {c} · {info.loc[c, 'nombre']}</b><br>{cuerpo}<br>{etq_total}: {f_num(totales.get(c, 0))}"
 
     fig = go.Figure()
-    leyenda = []
-    for i in range(n_clases):
-        codigos = list(clases[clases == i].index)
-        vals = serie[codigos]
-        etiqueta = f"[{fmt(vals.min())} - {fmt(vals.max())}]"
-        leyenda.append((colores[i], etiqueta))
-        fig.add_trace(
-            go.Choroplethmap(
-                geojson=gj,
-                featureidkey="id",
-                locations=codigos,
-                z=[1] * len(codigos),
-                zmin=0,
-                zmax=1,
-                colorscale=[[0, colores[i]], [1, colores[i]]],
-                showscale=False,
-                marker=dict(line=dict(width=1, color="#444"), opacity=0.82 if base != "Sin mapa base" else 1),
-                customdata=[[c, info.loc[c, "nombre"], fmt(serie[c]), f_num(totales[c])] for c in codigos],
-                hovertemplate=(
-                    "<b>UV %{customdata[0]} · %{customdata[1]}</b><br>"
-                    "Valor: %{customdata[2]}<br>Total personas con RSH: %{customdata[3]}<extra></extra>"
-                ),
-                name=etiqueta,
-            )
-        )
+
+    def capa(codigos, color):
+        fig.add_trace(go.Choroplethmap(
+            geojson=gj, featureidkey="id", locations=codigos, z=[1] * len(codigos), zmin=0, zmax=1,
+            colorscale=[[0, color], [1, color]], showscale=False,
+            marker=dict(line=dict(width=1, color="#444"), opacity=0.82 if base != "Sin mapa base" else 1),
+            customdata=[[hover(c)] for c in codigos], hovertemplate="%{customdata[0]}<extra></extra>"))
+
+    for c in usadas:
+        capa(list(clase[clase == c].index), colores[c])
+    if reserva.any():
+        capa(list(reserva[reserva].index), COLOR_RESERVA)
     if rotulos:
         cods = list(serie.index)
-        fig.add_trace(
-            go.Scattermap(
-                lon=info.loc[cods, "lon"],
-                lat=info.loc[cods, "lat"],
-                mode="text",
-                text=[f"UV {c}<br>{fmt(serie[c])}" for c in cods],
-                textfont=dict(size=10, color="#111"),
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
+        fig.add_trace(go.Scattermap(
+            lon=info.loc[cods, "lon"], lat=info.loc[cods, "lat"], mode="text",
+            text=[f"UV {c}<br>{texto(c)}" for c in cods], textfont=dict(size=10, color="#111"),
+            hoverinfo="skip", showlegend=False))
 
     sub = info if zona == "Toda la comuna" else info[info["area"] == "Urbana"]
     w, e, s, n = sub["w"].min(), sub["e"].max(), sub["s"].min(), sub["n"].max()
-    mapa = dict(center=dict(lon=(w + e) / 2, lat=(s + n) / 2), zoom=zoom_para(w, s, e, n))
+    mapa = dict(center=dict(lon=(w + e) / 2, lat=(s + n) / 2), zoom=zoom_para(w, s, e, n, px_h=altura))
     if base == "Calles":
         mapa["style"] = "open-street-map"
     elif base == "Satélite":
@@ -394,11 +476,11 @@ def mapa_tematico(serie, totales, porcentaje, metodo, base, rotulos, zona, palet
                                sourceattribution="Imágenes © Esri, Maxar, Earthstar Geographics")]
     else:
         mapa["style"] = "white-bg"
-    fig.update_layout(map=mapa, margin=dict(l=0, r=0, t=0, b=0), height=640, showlegend=False, uirevision=zona)
-    return fig, leyenda
+    fig.update_layout(map=mapa, margin=dict(l=0, r=0, t=0, b=0), height=altura, showlegend=False, uirevision=zona)
+    return fig
 
 
-def leyenda_html(titulo, clases):
+def leyenda_html(titulo, subtitulo, clases):
     filas = "".join(
         f'<div style="display:flex;align-items:center;gap:8px;margin:5px 0">'
         f'<span style="width:20px;height:14px;background:{c};border:1px solid #666;display:inline-block"></span>'
@@ -407,7 +489,8 @@ def leyenda_html(titulo, clases):
     )
     return (
         '<div style="background:#fff;border:1px solid #ccc;padding:10px 12px;font-size:13px">'
-        f"<b>{titulo}</b><div style='margin-top:6px'>{filas}</div></div>"
+        f"<b>{titulo}</b><div style='color:#4a5a70;font-size:12px'>{subtitulo}</div>"
+        f"<div style='margin-top:6px'>{filas}</div></div>"
     )
 
 
@@ -476,6 +559,7 @@ with izq:
         z_controles = st.container()
         z_acciones = st.container()
         z_carga = st.container()
+        z_ayuda = st.container()
 
 ruta_local = os.environ.get("ADIS_BASE_LOCAL")  # solo para pruebas
 with z_carga:
@@ -484,8 +568,10 @@ with z_carga:
         df = None
         if archivo is not None:
             df = leer_base(archivo)
+            ss["corte"] = leer_corte(archivo)
         elif ruta_local and Path(ruta_local).exists():
             df = leer_base(ruta_local)
+            ss["corte"] = leer_corte(ruta_local)
 if df is None:
     with der:
         st.markdown(
@@ -499,6 +585,9 @@ if df is None:
     st.stop()
 
 APERTURAS, CAT_FILTRO, CAT_AP = estructura(df)
+with z_ayuda:
+    with st.expander("Ayuda"):
+        st.markdown(AYUDA)
 TODAS = sorted({v for v in df["filtro_variable"].unique() if v != SIN_FILTRO} | set(df["apertura_variable"].unique()))
 fvar = ss["_fvar"] if ss["_fvar"] in APERTURAS else SIN_FILTRO
 fcats = [c for c in ss["_fcats"] if c in CAT_FILTRO.get(fvar, [])]
@@ -535,8 +624,11 @@ with z_controles:
             paleta = st.selectbox("Paleta (con apertura)", list(PALETAS), key="paleta")
         with c_ord.popover("Ordenar", icon=":material/sort_by_alpha:", width="stretch"):
             orden = st.radio("Ordenar por", ORDENES, key="orden_grafico")
+    apilado = True
+    if ss.vista == "Gráficos":
+        apilado = st.radio("Tipo de gráfico", ["Barras apiladas", "Barras agrupadas"], key="tipo_grafico", horizontal=True) == "Barras apiladas"
     c_modo, c_ap = st.columns(2)
-    modo = c_modo.selectbox("Números o Porcentajes", ["Números", "Porcentajes"], key="modo")
+    modo = c_modo.selectbox("Números o Porcentajes", ["Números", "% de la fila", "% de la columna"], key="modo")
     apertura_et = c_ap.selectbox(
         "Tipo de Apertura", ["Sin apertura"] + ap_todas, key="apertura_et",
         format_func=lambda x: x if (x == "Sin apertura" or x in ap_validas) else f"{x} (sin datos)")
@@ -545,13 +637,15 @@ with z_controles:
     categoria = None
     if ss.vista == "Mapas":
         if apertura and cruce_ok:
-            categoria = st.selectbox("Categoría a mapear", CAT_AP[apertura], key=f"cat_{apertura}")
+            categoria = st.selectbox("Categoría a mapear", ["Todas las categorías"] + CAT_AP[apertura],
+                                     index=1, key=f"cat_{apertura}")
         base = st.selectbox("Mapa base", ["Calles", "Satélite", "Sin mapa base"], key="base_mapa")
         zona = st.radio("Zona", ["Toda la comuna", "Área urbana"], key="zona", horizontal=True)
         rotulos = st.checkbox("Mostrar rótulos", value=True, key="rotulos")
 
-porcentaje = modo == "Porcentajes"
-lo, hi = calcular(df, fvar, fcats, apertura, porcentaje) if cruce_ok else (None, None)
+porcentaje = modo != "Números"
+base_pct = "columna" if modo == "% de la columna" else "fila"
+lo, hi = calcular(df, fvar, fcats, apertura, porcentaje, base_pct) if cruce_ok else (None, None)
 
 with z_acciones:
     if cruce_ok:
@@ -580,6 +674,11 @@ with der:
             if ss["_fvar"] != SIN_FILTRO:
                 st.pills("Categorías (puedes elegir varias)", CAT_FILTRO[ss["_fvar"]], selection_mode="multi",
                          default=ss["_fcats"], key=f"w_cats_{ss['_fvar']}", on_change=cambia_categorias)
+                if ss["_fvar"] == "Cuidados" and len(ss["_fcats"]) > 1:
+                    st.warning(
+                        "Una persona puede ser cuidadora y, a la vez, requerir cuidados. ADIS la cuenta una sola vez; "
+                        "esta suma la cuenta en cada categoría, por lo que el resultado puede estar sobrestimado.",
+                        icon=":material/warning:")
 
         fvar = ss["_fvar"]
         fcats = [c for c in ss["_fcats"] if c in CAT_FILTRO.get(fvar, [])]
@@ -587,20 +686,35 @@ with der:
             fvar = SIN_FILTRO
         cruce_ok = apertura is None or apertura in [a for a in APERTURAS[fvar] if a in CAT_AP and a != fvar]
         if cruce_ok:
-            lo, hi = calcular(df, fvar, fcats, apertura, porcentaje)
+            lo, hi = calcular(df, fvar, fcats, apertura, porcentaje, base_pct)
         descripcion = (", ".join(fcats) if fvar != SIN_FILTRO else "Todas las personas") + " en La Serena por unidades vecinales"
         descripcion += f", según {apertura}." if apertura else "."
 
+        fecha_txt = f" a {ss.get('corte')}" if ss.get("corte") else ""
         titulo_slot.markdown(
-            "**Personas presentes en el Registro Social de Hogares a agosto del 2026 con las siguientes características:**"
+            f"**Personas presentes en el Registro Social de Hogares{fecha_txt} con las siguientes características:**"
         )
-        titulo_slot.markdown(f"*{descripcion}*")
+        cajas = ["Personas en el RSH"]
+        if fvar != SIN_FILTRO:
+            cajas.append(f"{fvar}: " + " o ".join(fcats))
+        if apertura:
+            cajas.append(f"Apertura: {apertura}")
+        cajas += ["La Serena por unidades vecinales", {"Números": "Números", "% de la fila": "% del total de la fila",
+                                                       "% de la columna": "% del total de la columna"}[modo]]
+        titulo_slot.markdown(
+            '<div class="resumen"><span class="resumen-et">Ver estadísticas de:</span>'
+            + "".join(f'<span class="caja">{c}</span>' for c in cajas) + "</div>",
+            unsafe_allow_html=True,
+        )
 
         if porcentaje:
-            st.caption(
-                "Porcentaje sobre el total de personas con RSH de cada unidad vecinal."
-                if apertura is None else "Porcentaje sobre el total de personas de la consulta en cada unidad vecinal."
-            )
+            if base_pct == "columna":
+                st.caption("Porcentaje sobre el total de la columna: cuánto aporta cada unidad vecinal al total comunal.")
+            else:
+                st.caption(
+                    "Porcentaje sobre el total de personas con RSH de cada unidad vecinal."
+                    if apertura is None else "Porcentaje sobre el total de personas de la consulta en cada unidad vecinal."
+                )
 
         if not cruce_ok:
             filtro_txt = "Sin filtro" if fvar == SIN_FILTRO else fvar
@@ -620,15 +734,48 @@ with der:
         if ss.vista == "Tablas":
             st.dataframe(texto_tabla(lo, hi, porcentaje).reset_index(), hide_index=True, width="stretch", height=430)
         elif ss.vista == "Gráficos":
-            st.plotly_chart(grafico(valores, apertura, porcentaje, color, paleta, orden), width="stretch")
+            st.plotly_chart(
+                grafico(valores, apertura, porcentaje, color, paleta, orden, apilado), width="stretch",
+                config={"displaylogo": False, "toImageButtonOptions": {"filename": "grafico_adis_comunal", "scale": 2}})
         else:
-            serie = valores[categoria] if categoria else valores.iloc[:, 0]
-            totales = (lo[COL_TOTAL] if COL_TOTAL in lo.columns else lo[COL_TOT]).drop(
-                [i for i in ["Total", "S.I."] if i in lo.index])
-            fig, leyenda = mapa_tematico(serie, totales.fillna(0), porcentaje, ss.tipo_clas, base, rotulos, zona, ss.paleta_mapa)
-            m1, m2 = st.columns([4, 1])
-            m1.plotly_chart(fig, width="stretch")
-            m2.markdown(leyenda_html(categoria or COL_SEL, leyenda), unsafe_allow_html=True)
+            lo_n, hi_n = (lo, hi) if not porcentaje else calcular(df, fvar, fcats, apertura, False)
+            quitar = [i for i in ["Total", "S.I."] if i in lo_n.index]
+            n_lo, n_hi = lo_n.drop(index=quitar, columns=excluir), hi_n.drop(index=quitar, columns=excluir)
+            totales = (lo_n[COL_TOTAL] if COL_TOTAL in lo_n.columns else lo_n[COL_TOT]).drop(quitar).fillna(0)
+            etq_total = "Total personas con RSH" if apertura is None else "Total de la consulta en la UV"
+            if categoria is None:
+                cats_mapa = [valores.columns[0]]
+            elif categoria == "Todas las categorías":
+                cats_mapa = list(valores.columns)
+            else:
+                cats_mapa = [categoria]
+            ref = []
+            for c in cats_mapa:
+                res = (n_hi[c] > n_lo[c]) & (n_lo[c] < 10)
+                ref.append(valores[c][~res])
+            bins = calcular_bins(pd.concat(ref), ss.tipo_clas)
+            sub_t = "Porcentaje sobre el total" if porcentaje else "Número de personas"
+            hay_res = any(bool(((n_hi[c] > n_lo[c]) & (n_lo[c] < 10)).any()) for c in cats_mapa)
+            leyenda = leyenda_bins(bins, porcentaje, ss.paleta_mapa, hay_res)
+            if len(cats_mapa) == 1:
+                c = cats_mapa[0]
+                nombre = c if categoria else COL_SEL
+                fig = mapa_tematico(valores[c], n_lo[c], n_hi[c], totales, porcentaje, bins, base, rotulos,
+                                    zona, ss.paleta_mapa, nombre, etq_total)
+                m1, m2 = st.columns([4, 1])
+                m1.plotly_chart(fig, width="stretch")
+                m2.markdown(leyenda_html(nombre, sub_t, leyenda), unsafe_allow_html=True)
+            else:
+                m1, m2 = st.columns([4, 1])
+                with m1:
+                    for k in range(0, len(cats_mapa), 3):
+                        cols3 = st.columns(3)
+                        for caja, c in zip(cols3, cats_mapa[k:k + 3]):
+                            fig = mapa_tematico(valores[c], n_lo[c], n_hi[c], totales, porcentaje, bins, base,
+                                                False, zona, ss.paleta_mapa, c, etq_total, altura=330)
+                            caja.markdown(f"**{c}**")
+                            caja.plotly_chart(fig, width="stretch", key=f"m_{c}")
+                m2.markdown(leyenda_html("Todas las categorías", sub_t + " (misma escala en todos)", leyenda), unsafe_allow_html=True)
             st.caption("Los límites de las unidades vecinales son referenciales.")
 
         if fvar != SIN_FILTRO:
