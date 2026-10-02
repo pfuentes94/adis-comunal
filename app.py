@@ -23,7 +23,8 @@ NOTA = (
     "Tenga precaución a la hora de comparar resultados desagregados por UV de antes y después de esa fecha."
 )
 NOTA_RESERVA = (
-    "Las celdas con reserva estadística se muestran como «1 a 9». En gráficos y mapas se representan con 5."
+    "Las celdas con reserva estadística se muestran como «1 a 9». Las cifras que suman categorías con reserva "
+    "se muestran como valor aproximado (punto medio). En gráficos y mapas se usa el valor central."
 )
 CLASIFICACIONES = ["Quiebres naturales", "Cuantiles", "Intervalos iguales"]
 PALETAS_MAPA = {
@@ -91,9 +92,36 @@ def preparar(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["filtro_variable", "filtro_categoria", "apertura_variable", "apertura_categoria"]:
         df[c] = df[c].astype(str).str.strip()
     reserva = df["estado"].isin(["1 a 9", "oculto"]) | df["personas"].isna()
+    df["apertura_variable"] = df["apertura_variable"].replace({"Zona urbana/rural": "Zona"})
     df["lo"] = np.where(reserva, 1.0, df["personas"])
     df["hi"] = np.where(reserva, 9.0, df["personas"])
-    return df
+    df["derivado"] = False
+    return agregar_invertidos(df)
+
+
+def agregar_invertidos(df: pd.DataFrame) -> pd.DataFrame:
+    """Un cruce «A filtrado × B» contiene los mismos datos que «B filtrado × A»: se agrega el inverso.
+    No se calcula nada: son las mismas cifras de ADIS reubicadas. El total sale de la tabla simple de B."""
+    existentes = set(map(tuple, df[["filtro_variable", "apertura_variable"]].drop_duplicates().values))
+    src = df[(df["filtro_variable"] != SIN_FILTRO) & ~df["apertura_categoria"].isin([COL_TOT, COL_SI])]
+    inv = src.rename(columns={
+        "filtro_variable": "apertura_variable", "apertura_variable": "filtro_variable",
+        "filtro_categoria": "apertura_categoria", "apertura_categoria": "filtro_categoria"})
+    inv = inv[[(f, a) not in existentes for f, a in zip(inv["filtro_variable"], inv["apertura_variable"])]]
+    if inv.empty:
+        return df
+    # fila «Total»: personas con la característica del nuevo filtro (tabla simple de esa variable)
+    simple = df[(df["filtro_variable"] == SIN_FILTRO) & ~df["apertura_categoria"].isin([COL_TOT, COL_SI])]
+    simple = simple.drop(columns=["filtro_variable", "filtro_categoria"]).rename(
+        columns={"apertura_variable": "filtro_variable", "apertura_categoria": "filtro_categoria"})
+    simple = simple[["filtro_variable", "filtro_categoria", "unidad_vecinal", "personas", "estado", "lo", "hi"]]
+    claves = inv[["filtro_variable", "filtro_categoria", "apertura_variable"]].drop_duplicates()
+    tot = claves.merge(simple, on=["filtro_variable", "filtro_categoria"])
+    tot["apertura_categoria"] = COL_TOT
+    inv = inv.copy()
+    inv["derivado"] = True
+    tot["derivado"] = True
+    return pd.concat([df, inv.reindex(columns=df.columns), tot.reindex(columns=df.columns)], ignore_index=True)
 
 
 def leer_base(archivo) -> pd.DataFrame | None:
@@ -230,7 +258,12 @@ def texto_tabla(lo, hi, porcentaje):
             elif abs(a - b) < 1e-9 or (c == COL_TOTAL):
                 out.at[i, c] = f(a)
             elif porcentaje:
-                out.at[i, c] = f"{a:.1f} a {b:.1f} %".replace(".", ",")
+                if a >= 10:
+                    out.at[i, c] = f_pct((a + b) / 2)
+                else:
+                    out.at[i, c] = f"{a:.1f} a {b:.1f} %".replace(".", ",")
+            elif a >= 10:
+                out.at[i, c] = f_num((a + b) / 2)
             else:
                 out.at[i, c] = f"{f_num(a)} a {f_num(b)}"
     out = out.rename(columns={COL_SI: COL_SI + "*"})
@@ -423,6 +456,17 @@ def cambia_variable():
     ss["_fcats"] = []
 
 
+def matriz_cruces():
+    filas = [SIN_FILTRO] + [v for v in TODAS if v in CAT_FILTRO]
+    tabla = pd.DataFrame({
+        "Filtro": ["Sin filtro" if f == SIN_FILTRO else f for f in filas],
+        "Se puede abrir por": [", ".join(sorted(a for a in APERTURAS.get(f, []) if a != f)) or "—" for f in filas],
+    })
+    with st.expander("Cruces disponibles"):
+        st.caption("Cada fila indica con qué variables se puede abrir ese filtro. Lo que no aparece no está disponible con la base actual.")
+        st.dataframe(tabla, hide_index=True, width="stretch")
+
+
 # ---------------------------------------------------------------- interfaz
 izq, der = st.columns([1.4, 3], gap="medium")
 
@@ -433,29 +477,29 @@ with izq:
         z_acciones = st.container()
         z_carga = st.container()
 
+ruta_local = os.environ.get("ADIS_BASE_LOCAL")  # solo para pruebas
 with z_carga:
-    with st.expander("Base de datos"):
+    with st.expander("Base de datos", expanded=True):
         archivo = st.file_uploader("Subir base (Excel)", type=["xlsx"])
         df = None
-        ruta_local = os.environ.get("ADIS_BASE_LOCAL")
         if archivo is not None:
             df = leer_base(archivo)
         elif ruta_local and Path(ruta_local).exists():
             df = leer_base(ruta_local)
-            st.caption("Base cargada desde el equipo.")
-        else:
-            df = preparar(datos_demo())
-            st.caption("Datos de demostración ficticios.")
-            st.download_button(
-                "Descargar base de ejemplo",
-                a_excel(datos_demo()),
-                file_name="base_ejemplo_adis_comunal.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
 if df is None:
+    with der:
+        st.markdown(
+            '<div style="background:#f3f5f8;border-top:6px solid #1f3a5f;padding:28px 24px;margin-top:8px">'
+            '<h3 style="margin:0 0 8px 0;color:#1f3a5f">Sube la base de datos para comenzar</h3>'
+            '<p style="margin:0;color:#4a5a70">Usa el botón <b>Upload</b> del recuadro «Base de datos» '
+            '(panel izquierdo) y selecciona el archivo Excel de la base ADIS. '
+            'Al cargarla se mostrarán las tablas, gráficos y mapas por unidad vecinal.</p></div>',
+            unsafe_allow_html=True,
+        )
     st.stop()
 
 APERTURAS, CAT_FILTRO, CAT_AP = estructura(df)
+TODAS = sorted({v for v in df["filtro_variable"].unique() if v != SIN_FILTRO} | set(df["apertura_variable"].unique()))
 fvar = ss["_fvar"] if ss["_fvar"] in APERTURAS else SIN_FILTRO
 fcats = [c for c in ss["_fcats"] if c in CAT_FILTRO.get(fvar, [])]
 if not fcats:
@@ -463,7 +507,8 @@ if not fcats:
 ap_validas = [a for a in APERTURAS[fvar] if a in CAT_AP]
 if fvar != SIN_FILTRO and fvar in ap_validas:
     ap_validas.remove(fvar)  # abrir por la misma variable del filtro no aporta
-if ss.get("apertura_et") not in ["Sin apertura"] + ap_validas:
+ap_todas = [v for v in TODAS if v != fvar]
+if ss.get("apertura_et") not in ["Sin apertura"] + ap_todas:
     ss["apertura_et"] = "Sin apertura"
 
 with z_botones:
@@ -492,25 +537,31 @@ with z_controles:
             orden = st.radio("Ordenar por", ORDENES, key="orden_grafico")
     c_modo, c_ap = st.columns(2)
     modo = c_modo.selectbox("Números o Porcentajes", ["Números", "Porcentajes"], key="modo")
-    apertura_et = c_ap.selectbox("Tipo de Apertura", ["Sin apertura"] + ap_validas, key="apertura_et")
+    apertura_et = c_ap.selectbox(
+        "Tipo de Apertura", ["Sin apertura"] + ap_todas, key="apertura_et",
+        format_func=lambda x: x if (x == "Sin apertura" or x in ap_validas) else f"{x} (sin datos)")
     apertura = None if apertura_et == "Sin apertura" else apertura_et
+    cruce_ok = apertura is None or apertura in ap_validas
     categoria = None
     if ss.vista == "Mapas":
-        if apertura:
+        if apertura and cruce_ok:
             categoria = st.selectbox("Categoría a mapear", CAT_AP[apertura], key=f"cat_{apertura}")
         base = st.selectbox("Mapa base", ["Calles", "Satélite", "Sin mapa base"], key="base_mapa")
         zona = st.radio("Zona", ["Toda la comuna", "Área urbana"], key="zona", horizontal=True)
         rotulos = st.checkbox("Mostrar rótulos", value=True, key="rotulos")
 
 porcentaje = modo == "Porcentajes"
-lo, hi = calcular(df, fvar, fcats, apertura, porcentaje)
+lo, hi = calcular(df, fvar, fcats, apertura, porcentaje) if cruce_ok else (None, None)
 
 with z_acciones:
-    st.download_button(
-        "Descargar", a_excel(texto_tabla(lo, hi, porcentaje).reset_index()), file_name="consulta_adis_comunal.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        icon=":material/download:", type="primary", width="stretch",
-    )
+    if cruce_ok:
+        st.download_button(
+            "Descargar", a_excel(texto_tabla(lo, hi, porcentaje).reset_index()), file_name="consulta_adis_comunal.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            icon=":material/download:", type="primary", width="stretch",
+        )
+    else:
+        st.button("Descargar", icon=":material/download:", disabled=True, width="stretch", key="btn_desc_off")
 
 descripcion = (", ".join(fcats) if fvar != SIN_FILTRO else "Todas las personas") + " en La Serena por unidades vecinales"
 descripcion += f", según {apertura}." if apertura else "."
@@ -520,7 +571,7 @@ with der:
         titulo_slot = st.container()
         with st.container():
             a, c_n, c_r = st.columns([2.2, 1, 1], vertical_alignment="bottom")
-            opciones = [SIN_FILTRO] + [v for v in APERTURAS if v != SIN_FILTRO]
+            opciones = [SIN_FILTRO] + [v for v in TODAS if v in CAT_FILTRO]
             a.selectbox("Variable de filtro", opciones, index=opciones.index(ss["_fvar"]) if ss["_fvar"] in opciones else 0,
                         key="w_fvar", on_change=cambia_variable,
                         format_func=lambda x: "Sin filtro" if x == SIN_FILTRO else x)
@@ -534,7 +585,9 @@ with der:
         fcats = [c for c in ss["_fcats"] if c in CAT_FILTRO.get(fvar, [])]
         if not fcats:
             fvar = SIN_FILTRO
-        lo, hi = calcular(df, fvar, fcats, apertura, porcentaje) if (apertura is None or apertura in APERTURAS[fvar]) else (lo, hi)
+        cruce_ok = apertura is None or apertura in [a for a in APERTURAS[fvar] if a in CAT_AP and a != fvar]
+        if cruce_ok:
+            lo, hi = calcular(df, fvar, fcats, apertura, porcentaje)
         descripcion = (", ".join(fcats) if fvar != SIN_FILTRO else "Todas las personas") + " en La Serena por unidades vecinales"
         descripcion += f", según {apertura}." if apertura else "."
 
@@ -548,6 +601,17 @@ with der:
                 "Porcentaje sobre el total de personas con RSH de cada unidad vecinal."
                 if apertura is None else "Porcentaje sobre el total de personas de la consulta en cada unidad vecinal."
             )
+
+        if not cruce_ok:
+            filtro_txt = "Sin filtro" if fvar == SIN_FILTRO else fvar
+            st.markdown(
+                '<div style="background:#fff;border:1px solid #c9d3e0;border-left:6px solid #1f4e8c;padding:16px 18px;margin:10px 0">'
+                '<b>Este cruce no está disponible con los datos actuales.</b><br>'
+                f'<span style="color:#4a5a70">«{filtro_txt}» × «{apertura}» no existe en la base cargada. '
+                'Elige otra apertura u otro filtro; el detalle de lo disponible está en «Cruces disponibles», más abajo.</span></div>',
+                unsafe_allow_html=True)
+            matriz_cruces()
+            st.stop()
 
         mid = (lo + hi) / 2
         excluir = [c for c in mid.columns if c in (COL_TOTAL, COL_TOT, COL_SI)]
@@ -567,4 +631,9 @@ with der:
             m2.markdown(leyenda_html(categoria or COL_SEL, leyenda), unsafe_allow_html=True)
             st.caption("Los límites de las unidades vecinales son referenciales.")
 
+        if fvar != SIN_FILTRO:
+            fsub = df[(df["filtro_variable"] == fvar) & df["filtro_categoria"].isin(fcats) & (df["apertura_variable"] == (apertura or df["apertura_variable"].iloc[0]))]
+            if apertura and fsub["derivado"].any():
+                st.caption("Este cruce se obtuvo invirtiendo uno descargado de ADIS (mismas cifras); no incluye la columna «Sin información».")
         st.markdown(f'<div class="nota">{NOTA}<br>{NOTA_RESERVA}</div>', unsafe_allow_html=True)
+        matriz_cruces()
