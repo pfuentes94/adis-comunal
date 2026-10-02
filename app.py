@@ -41,10 +41,18 @@ COLUMNAS_BASE = ["filtro_variable", "filtro_categoria", "apertura_variable", "ap
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 3.6rem; max-width: 100%;}
+    .block-container {padding-top: 2.2rem; padding-bottom: 1rem; max-width: 100%;}
+    html, body, [class*="st-"] {font-size: 0.92rem;}
+    .st-key-panel_izq [data-testid="stVerticalBlock"], .st-key-panel_der [data-testid="stVerticalBlock"] {gap: 0.55rem;}
+    .st-key-panel_izq label p {font-size: 0.82rem; margin-bottom: 0;}
+    .st-key-panel_izq hr {margin: 0.4rem 0;}
+    .st-key-panel_izq [data-baseweb="select"] > div {min-height: 2.2rem;}
+    .st-key-panel_izq button, .st-key-panel_der button {min-height: 2.2rem;}
+    .st-key-panel_der [data-testid="stElementToolbar"] {display:none;}
+    .st-key-panel_der h1, .st-key-panel_der h2, .st-key-panel_der h3 {padding: 0.2rem 0;}
     .st-key-panel_izq button {padding: 0.25rem 0.35rem;}
-    .st-key-panel_izq {background:#f3f5f8; border-top:6px solid #5b7fa8; padding:14px 14px 18px 14px;}
-    .st-key-panel_der {background:#f3f5f8; border-top:6px solid #1f3a5f; padding:16px 20px 12px 20px;}
+    .st-key-panel_izq {background:#f3f5f8; border-top:6px solid #5b7fa8; padding:10px 12px 12px 12px;}
+    .st-key-panel_der {background:#f3f5f8; border-top:6px solid #1f3a5f; padding:10px 16px 8px 16px;}
     button[kind="primary"] {background:#1f4e8c; border-color:#1f4e8c; color:#fff;}
     button[kind="primary"]:hover {background:#173c6c; border-color:#173c6c; color:#fff;}
     button[kind="secondary"] {border-color:#1f4e8c; color:#1f4e8c; background:#fff;}
@@ -395,14 +403,19 @@ def cerrar_consulta():
 
 
 def nueva_consulta():
+    ss[f"w_cats_{ss['_fvar']}"] = []
     ss["_fvar"], ss["_fcats"] = SIN_FILTRO, []
-    ss.editar = True
+    ss["w_fvar"] = SIN_FILTRO
 
 
 def restaurar():
     ss.modo = "Números"
     ss.apertura_et = "Sin apertura"
     ss.tipo_clas = "Quiebres naturales"
+
+
+def cambia_categorias():
+    ss["_fcats"] = list(ss.get(f"w_cats_{ss['_fvar']}", []))
 
 
 def cambia_variable():
@@ -469,8 +482,17 @@ with z_controles:
         st.selectbox("Tipo de mapa", ["Mapa temático por UV"], key="tipo_mapa")
         st.selectbox("Tipo de clasificación", CLASIFICACIONES, key="tipo_clas")
         st.selectbox("Paleta de colores", list(PALETAS_MAPA), key="paleta_mapa")
-    modo = st.selectbox("Números o Porcentajes", ["Números", "Porcentajes"], key="modo")
-    apertura_et = st.selectbox("Tipo de Apertura", ["Sin apertura"] + ap_validas, key="apertura_et")
+    color, paleta, orden = "#1f4e8c", "Colores", ORDENES[0]
+    if ss.vista == "Gráficos":
+        c_col, c_ord = st.columns(2)
+        with c_col.popover("Colorear", icon=":material/format_color_fill:", width="stretch"):
+            color = st.color_picker("Color de las barras (sin apertura)", "#1f4e8c", key="color_barras")
+            paleta = st.selectbox("Paleta (con apertura)", list(PALETAS), key="paleta")
+        with c_ord.popover("Ordenar", icon=":material/sort_by_alpha:", width="stretch"):
+            orden = st.radio("Ordenar por", ORDENES, key="orden_grafico")
+    c_modo, c_ap = st.columns(2)
+    modo = c_modo.selectbox("Números o Porcentajes", ["Números", "Porcentajes"], key="modo")
+    apertura_et = c_ap.selectbox("Tipo de Apertura", ["Sin apertura"] + ap_validas, key="apertura_et")
     apertura = None if apertura_et == "Sin apertura" else apertura_et
     categoria = None
     if ss.vista == "Mapas":
@@ -484,51 +506,37 @@ porcentaje = modo == "Porcentajes"
 lo, hi = calcular(df, fvar, fcats, apertura, porcentaje)
 
 with z_acciones:
-    st.write("")
     st.download_button(
         "Descargar", a_excel(texto_tabla(lo, hi, porcentaje).reset_index()), file_name="consulta_adis_comunal.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         icon=":material/download:", type="primary", width="stretch",
     )
-    st.button("Editar consulta", key="btn_editar", width="stretch", on_click=editar_consulta)
-    st.button("Hacer nueva consulta", key="btn_nueva", width="stretch", on_click=nueva_consulta)
 
 descripcion = (", ".join(fcats) if fvar != SIN_FILTRO else "Todas las personas") + " en La Serena por unidades vecinales"
 descripcion += f", según {apertura}." if apertura else "."
 
 with der:
     with st.container(key="panel_der"):
-        c_t, c_col, c_ord, c_r = st.columns([3.4, 1.3, 1.3, 1.5])
-        titulo_slot = c_t.container()
-        color, paleta, orden = "#1f4e8c", "Colores", ORDENES[0]
-        if ss.vista == "Gráficos":
-            with c_col.popover("Colorear", icon=":material/format_color_fill:", width="stretch"):
-                color = st.color_picker("Color de las barras (sin apertura)", "#1f4e8c", key="color_barras")
-                paleta = st.selectbox("Paleta (con apertura)", list(PALETAS), key="paleta")
-            with c_ord.popover("Ordenar", icon=":material/sort_by_alpha:", width="stretch"):
-                orden = st.radio("Ordenar por", ORDENES, key="orden_grafico")
-        c_r.button("Restaurar", icon=":material/refresh:", key="btn_restaurar", on_click=restaurar, width="stretch")
+        titulo_slot = st.container()
+        with st.container():
+            a, c_n, c_r = st.columns([2.2, 1, 1], vertical_alignment="bottom")
+            opciones = [SIN_FILTRO] + [v for v in APERTURAS if v != SIN_FILTRO]
+            a.selectbox("Variable de filtro", opciones, index=opciones.index(ss["_fvar"]) if ss["_fvar"] in opciones else 0,
+                        key="w_fvar", on_change=cambia_variable,
+                        format_func=lambda x: "Sin filtro" if x == SIN_FILTRO else x)
+            c_n.button("Nueva consulta", key="btn_nueva", width="stretch", on_click=nueva_consulta)
+            c_r.button("Restaurar", icon=":material/refresh:", key="btn_restaurar", on_click=restaurar, width="stretch")
+            if ss["_fvar"] != SIN_FILTRO:
+                st.pills("Categorías (puedes elegir varias)", CAT_FILTRO[ss["_fvar"]], selection_mode="multi",
+                         default=ss["_fcats"], key=f"w_cats_{ss['_fvar']}", on_change=cambia_categorias)
 
-        if ss.editar:
-            with st.container(border=True):
-                st.markdown("**Editar consulta**")
-                a, b = st.columns(2)
-                opciones = [SIN_FILTRO] + [v for v in APERTURAS if v != SIN_FILTRO]
-                a.selectbox("Variable de filtro", opciones, index=opciones.index(ss["_fvar"]) if ss["_fvar"] in opciones else 0,
-                            key="w_fvar", on_change=cambia_variable,
-                            format_func=lambda x: "Sin filtro" if x == SIN_FILTRO else x)
-                if ss["_fvar"] != SIN_FILTRO:
-                    ss["_fcats"] = b.multiselect("Categorías", CAT_FILTRO[ss["_fvar"]], default=ss["_fcats"],
-                                                 key=f"w_cats_{ss['_fvar']}", placeholder="Elegir una o más")
-                st.caption("Solo están disponibles los cruces descargados de ADIS: cada filtro se combina con las aperturas indicadas.")
-                st.button("Ver resultados", key="btn_cerrar", type="primary", on_click=cerrar_consulta)
-            fvar = ss["_fvar"]
-            fcats = [c for c in ss["_fcats"] if c in CAT_FILTRO.get(fvar, [])]
-            if not fcats:
-                fvar = SIN_FILTRO
-            lo, hi = calcular(df, fvar, fcats, apertura, porcentaje) if (apertura is None or apertura in APERTURAS[fvar]) else (lo, hi)
-            descripcion = (", ".join(fcats) if fvar != SIN_FILTRO else "Todas las personas") + " en La Serena por unidades vecinales"
-            descripcion += f", según {apertura}." if apertura else "."
+        fvar = ss["_fvar"]
+        fcats = [c for c in ss["_fcats"] if c in CAT_FILTRO.get(fvar, [])]
+        if not fcats:
+            fvar = SIN_FILTRO
+        lo, hi = calcular(df, fvar, fcats, apertura, porcentaje) if (apertura is None or apertura in APERTURAS[fvar]) else (lo, hi)
+        descripcion = (", ".join(fcats) if fvar != SIN_FILTRO else "Todas las personas") + " en La Serena por unidades vecinales"
+        descripcion += f", según {apertura}." if apertura else "."
 
         titulo_slot.markdown(
             "**Personas presentes en el Registro Social de Hogares a agosto del 2026 con las siguientes características:**"
@@ -546,7 +554,7 @@ with der:
         valores = mid.drop(index=[i for i in ["Total", "S.I."] if i in mid.index], columns=excluir)
 
         if ss.vista == "Tablas":
-            st.dataframe(texto_tabla(lo, hi, porcentaje).reset_index(), hide_index=True, width="stretch", height=560)
+            st.dataframe(texto_tabla(lo, hi, porcentaje).reset_index(), hide_index=True, width="stretch", height=430)
         elif ss.vista == "Gráficos":
             st.plotly_chart(grafico(valores, apertura, porcentaje, color, paleta, orden), width="stretch")
         else:
